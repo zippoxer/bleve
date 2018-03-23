@@ -126,16 +126,32 @@ func (i *IndexSnapshotTermFieldReader) Advance(ID index.IndexInternalID, preAllo
 		}
 		*i = *(i2.(*IndexSnapshotTermFieldReader))
 	}
-	// FIXME do something better
-	next, err := i.Next(preAlloced)
+
+	return i.Skip(ID, preAlloced)
+}
+
+func (i *IndexSnapshotTermFieldReader) Skip(ID index.IndexInternalID,
+	preAlloced *index.TermFieldDoc) (*index.TermFieldDoc, error) {
+	// skip directly to the target segment
+	docNum, err := docInternalToNumber(ID)
 	if err != nil {
-		return nil, err
-	}
-	if next == nil {
 		return nil, nil
 	}
+	segIndex, _ := i.snapshot.segmentIndexAndLocalDocNumFromGlobal(docNum)
+	if segIndex > len(i.snapshot.segment) {
+		return nil, nil
+	}
+
+	if preAlloced == nil {
+		preAlloced = &index.TermFieldDoc{}
+	}
+	next, err := i.glean(ID, segIndex, preAlloced)
+	if err != nil || next == nil {
+		return nil, err
+	}
+
 	for bytes.Compare(next.ID, ID) < 0 {
-		next, err = i.Next(preAlloced)
+		next, err = i.glean(ID, segIndex, preAlloced)
 		if err != nil {
 			return nil, err
 		}
@@ -144,6 +160,27 @@ func (i *IndexSnapshotTermFieldReader) Advance(ID index.IndexInternalID, preAllo
 		}
 	}
 	return next, nil
+}
+
+// glean expects preAlloced TermFieldDoc
+func (i *IndexSnapshotTermFieldReader) glean(ID index.IndexInternalID,
+	index int,
+	preAlloced *index.TermFieldDoc) (*index.TermFieldDoc, error) {
+	next, err := i.iterators[index].Next()
+	if err != nil || next == nil {
+		return nil, err
+	}
+
+	preAlloced.ID = docNumberToBytes(preAlloced.ID,
+		next.Number()+i.snapshot.offsets[index])
+	// skip the read of freq,loc,norms
+	if bytes.Compare(preAlloced.ID, ID) < 0 {
+		return preAlloced, nil
+	}
+	i.postingToTermFieldDoc(next, preAlloced)
+	i.currID = preAlloced.ID
+	i.currPosting = next
+	return preAlloced, nil
 }
 
 func (i *IndexSnapshotTermFieldReader) Count() uint64 {
